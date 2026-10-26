@@ -32,8 +32,12 @@ Surfaces (all GET, all per market host; JSON unless noted):
     pod's own IP and any non-market exit get a 160 KB shell; with it every
     market answers the blob from the pod's own IP). An unknown id answers
     HTTP 200 with an EMPTY cachedMap (parsers.parse_product -> None).
-  * SHOP          /api/v4/shop/get_shop_detail?shopid=|username=  (unknown
-    id -> error 1000000 service_err, unknown username -> 2003013)
+  * SHOP          /api/v4/shop/get_shop_base?shopid=|username= with the
+    Android app identity (APP_HEADERS; unknown id or username -> error
+    1000000 service_err). The web get_shop_detail it replaced went behind
+    the 90309999 gate on 2026-10-26 on every market and every exit tier
+    (pod test: direct, datacenter-proxy and country residential exits all
+    403), while get_shop_base with the app identity answered all 9 markets.
   * SHOP CATS     /api/v4/shop/get_categories?shopid=&offset=&limit=
   * SHOP REVIEWS  /api/v4/seller_operation/get_shop_ratings_new?shopid=
                   &type=<1..5 stars>&limit=&offset=  (type=0 answers nothing)
@@ -78,6 +82,14 @@ API_HEADERS = {
     "accept": "application/json",
     "x-api-source": "pc",
     "x-requested-with": "XMLHttpRequest",
+    "x-shopee-language": "en",
+}
+# The Android app's identity: the shop profile (get_shop_base) is open to it
+# while the web identity gets the 90309999 gate (2026-10-26).
+APP_HEADERS = {
+    "accept": "application/json",
+    "user-agent": "Android app Shopee appver=33330 app_type=1 platform=native_android os_ver=34 Cronet/102.0.5005.125",
+    "x-api-source": "rn",
     "x-shopee-language": "en",
 }
 # The x-* trio is what makes Shopee render the product blob server-side
@@ -196,10 +208,10 @@ def _status_check(resp, label):
         raise ShopeeUpstreamError(f"HTTP {status} for {label}")
 
 
-def _json_once(country, path, label, params=None, not_found_errors=()):
+def _json_once(country, path, label, params=None, not_found_errors=(), base_headers=None):
     url = refs.site(country) + path
     try:
-        resp = _session(country).get(url, params=params, headers=_headers(country, API_HEADERS),
+        resp = _session(country).get(url, params=params, headers=_headers(country, base_headers or API_HEADERS),
                                      timeout=JSON_TIMEOUT)
     except Exception as e:
         raise ShopeeUpstreamError(f"request failed: {type(e).__name__}: {e}")
@@ -223,8 +235,8 @@ def _json_once(country, path, label, params=None, not_found_errors=()):
     return payload
 
 
-def _json(country, path, label, params=None, not_found_errors=()):
-    return _retrying(country, lambda: _json_once(country, path, label, params, not_found_errors))
+def _json(country, path, label, params=None, not_found_errors=(), base_headers=None):
+    return _retrying(country, lambda: _json_once(country, path, label, params, not_found_errors, base_headers))
 
 
 # ---- product page ----------------------------------------------------------------
@@ -270,16 +282,18 @@ def page_title(html):
 
 # ---- shops ------------------------------------------------------------------------
 
-SHOP_NOT_FOUND_ERRORS = (1000000, 2003013)   # get_shop_detail: service_err (unknown id) / invalid_username
+SHOP_NOT_FOUND_ERRORS = (1000000, 2003013)   # service_err (unknown id / username) / invalid_username
 RATINGS_NOT_FOUND_ERRORS = (10000,)          # get_shop_ratings_new for a non-existent shop
 VOUCHERS_NOT_FOUND_ERRORS = (5300000,)       # get_shop_vouchers_by_shopid for a non-existent shop
 
 
-def fetch_shop_detail(country, shop_id=None, username=None):
+def fetch_shop_base(country, shop_id=None, username=None):
+    """The shop profile (get_shop_base) with the app identity — the web
+    get_shop_detail is gated since 2026-10-26 (module docstring)."""
     params = {"shopid": shop_id} if shop_id else {"username": username}
     label = f"shop {shop_id or username}"
-    return _json(country, "/api/v4/shop/get_shop_detail", label, params,
-                 not_found_errors=SHOP_NOT_FOUND_ERRORS)
+    return _json(country, "/api/v4/shop/get_shop_base", label, params,
+                 not_found_errors=SHOP_NOT_FOUND_ERRORS, base_headers=APP_HEADERS)
 
 
 def fetch_shop_categories(country, shop_id, offset=0, limit=50):

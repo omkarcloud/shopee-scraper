@@ -209,7 +209,31 @@ def test_parse_shop_other_markets():
 def test_parse_shop_not_found_payloads():
     assert P.parse_shop(fixture("shop_detail_unknown.json"), "sg")["id"] is None
     assert P.parse_shop(fixture("shop_detail_bad_username.json"), "sg")["id"] is None
+    assert P.parse_shop(fixture("shop_base_unknown.json"), "sg")["id"] is None
     assert P.parse_shop({}, "sg")["id"] is None
+
+
+def test_parse_shop_from_app_base():
+    """get_shop_base (the app identity's profile, read since 2026-10-26) maps
+    to the same record; the web-only fields come back null."""
+    base = P.parse_shop(fixture("shop_base_loreal.json"), "sg")
+    detail = P.parse_shop(fixture("shop_detail_loreal.json"), "sg")
+    assert list(base) == list(detail)
+    assert base["id"] == 15235546 and base["name"] == "L'Oreal Paris Official Store"
+    assert base["username"] == "lorealparissg" and base["link"] == "https://shopee.sg/shop/15235546"
+    assert base["is_official_shop"] is True and base["is_chat_enabled"] is True
+    assert base["rating"] == {"average": 4.89, "count": 80932, "good": 78955, "normal": 1506, "bad": 471}
+    assert base["items_count"] == 202 and base["followers_count"] == 71543 and base["following_count"] == 3
+    assert base["response_rate_percent"] == 100 and base["response_time_seconds"] == 10466
+    assert base["has_live_stream"] is True and base["has_membership"] is True
+    assert base["latest_item_listed_at"] == "2026-10-21T07:52:51Z" and base["joined_at"] == "2017-01-16T07:07:56Z"
+    assert base["description"].startswith("Buy shampoos")
+    for web_only in ("location", "preparation_time_seconds", "cancellation_rate_percent", "has_flash_sale",
+                     "has_brand_sale", "updated_at"):
+        assert base[web_only] is None, web_only
+    th = P.parse_shop(fixture("shop_base_th.json"), "th")
+    assert th["username"] == "rayban.th" and th["link"] == "https://shopee.co.th/shop/55953258"
+    assert th["is_official_shop"] is True and th["country"] == "TH"
 
 
 def test_parse_shop_categories():

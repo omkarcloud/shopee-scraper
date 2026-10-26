@@ -296,11 +296,26 @@ def parse_product(html, blob, country):
 # ---- shops ------------------------------------------------------------------------
 
 def parse_shop(payload, country):
+    """A shop profile from either payload: the app's get_shop_base (what
+    fetch.fetch_shop_base reads since 2026-10-26) or the web get_shop_detail
+    (gated now; its extra fields — location, preparation time, cancellation
+    rate, flash / brand sale flags, profile-update time — are null from the
+    base payload)."""
     data = (payload or {}).get("data") or {}
     account = data.get("account") or {}
+    shop_rating = data.get("shop_rating") if isinstance(data.get("shop_rating"), dict) else {}
+    tabs = data.get("show_tab") if isinstance(data.get("show_tab"), dict) else {}
+    new_arrivals = tabs.get("new_arrival_tab") if isinstance(tabs.get("new_arrival_tab"), dict) else {}
+    membership = tabs.get("membership_tab") if isinstance(tabs.get("membership_tab"), dict) else {}
     shop_id = data.get("shopid")
     username = text(account.get("username"))
-    good, normal, bad = number(data.get("rating_good")), number(data.get("rating_normal")), number(data.get("rating_bad"))
+
+    def first(*values):
+        return next((v for v in values if v is not None), None)
+
+    good = number(first(data.get("rating_good"), shop_rating.get("rating_good")))
+    normal = number(first(data.get("rating_normal"), shop_rating.get("rating_normal")))
+    bad = number(first(data.get("rating_bad"), shop_rating.get("rating_bad")))
     total = sum(x for x in (good, normal, bad) if isinstance(x, (int, float))) if any(
         isinstance(x, (int, float)) for x in (good, normal, bad)) else None
     average = number(data.get("rating_star"))
@@ -315,7 +330,7 @@ def parse_shop(payload, country):
         "location": text(data.get("shop_location")),
         "avatar": image(country, account.get("portrait")),
         "cover_image": image(country, data.get("cover")),
-        "is_official_shop": flag(data.get("is_official_shop")),
+        "is_official_shop": flag(first(data.get("is_official_shop"), data.get("show_official_shop_label"))),
         "is_shopee_verified": flag(data.get("is_shopee_verified")),
         "is_preferred_plus_seller": flag(data.get("is_preferred_plus_seller")),
         "is_on_vacation": flag(data.get("vacation")),
@@ -334,9 +349,9 @@ def parse_shop(payload, country):
         "cancellation_rate_percent": number(data.get("cancellation_rate")),
         "has_flash_sale": flag(data.get("has_flash_sale")),
         "has_brand_sale": flag(data.get("has_brand_sale")),
-        "has_live_stream": flag(data.get("show_live_tab")),
-        "has_membership": flag(data.get("show_membership_tab")),
-        "latest_item_listed_at": ts(data.get("latest_item_ctime")),
+        "has_live_stream": flag(first(data.get("show_live_tab"), tabs.get("show_live_tab"))),
+        "has_membership": flag(first(data.get("show_membership_tab"), membership.get("show_membership_tab"))),
+        "latest_item_listed_at": ts(first(data.get("latest_item_ctime"), new_arrivals.get("latest_item_ctime"))),
         "joined_at": ts(data.get("ctime")),
         "last_active_at": ts(data.get("last_active_time")),
         "updated_at": ts(data.get("mtime")),

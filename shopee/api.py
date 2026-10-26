@@ -18,7 +18,7 @@ from shopee import parsers
 from shopee import refs
 from shopee.fetch import (ShopeeNotFound, fetch_category_tree, fetch_daily_discover, fetch_flash_items,
                           fetch_flash_sessions, fetch_official_shops, fetch_product_page, fetch_search_hint,
-                          fetch_search_suggestion, fetch_shop_categories, fetch_shop_detail,
+                          fetch_search_suggestion, fetch_shop_base, fetch_shop_categories,
                           fetch_shop_ratings, fetch_shop_vouchers, product_blob)
 from shopee.schemas import (FLASH_SALE_PER_PAGE, OFFICIAL_SHOPS_PER_PAGE, REVIEWS_PER_PAGE,
                             SHOP_CATEGORIES_PER_PAGE)
@@ -41,9 +41,9 @@ def _pagination(page, per_page, total_count=None, has_next=None):
 def _shop_record(country, shop):
     """Parsed shop + vouchers for a canonical shop ref (digits = id, else username)."""
     if shop.isdigit():
-        payload = fetch_shop_detail(country, shop_id=int(shop))
+        payload = fetch_shop_base(country, shop_id=int(shop))
     else:
-        payload = fetch_shop_detail(country, username=shop)
+        payload = fetch_shop_base(country, username=shop)
     record = parsers.parse_shop(payload, country)
     if not record.get("id"):
         raise ShopeeNotFound(f"shop {shop} not found")
