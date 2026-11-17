@@ -9,7 +9,7 @@ Caching (cache.cached_call, keyed on the validated params):
   * shopee.product     the parsed product record
   * the list endpoints cache their own page
 Shops are cached under their resolved numeric id: a username is resolved
-through the same record (get_shop_detail accepts either), so a shop reached
+through the same record (the shop page answers either), so a shop reached
 by username and by id share one row after the first lookup.
 """
 from cache import cached_call
@@ -18,7 +18,7 @@ from shopee import parsers
 from shopee import refs
 from shopee.fetch import (ShopeeNotFound, fetch_category_tree, fetch_daily_discover, fetch_flash_items,
                           fetch_flash_sessions, fetch_official_shops, fetch_product_page, fetch_search_hint,
-                          fetch_search_suggestion, fetch_shop_base, fetch_shop_categories,
+                          fetch_search_suggestion, fetch_shop_categories, fetch_shop_profile,
                           fetch_shop_ratings, fetch_shop_vouchers, product_blob)
 from shopee.schemas import (FLASH_SALE_PER_PAGE, OFFICIAL_SHOPS_PER_PAGE, REVIEWS_PER_PAGE,
                             SHOP_CATEGORIES_PER_PAGE)
@@ -41,9 +41,9 @@ def _pagination(page, per_page, total_count=None, has_next=None):
 def _shop_record(country, shop):
     """Parsed shop + vouchers for a canonical shop ref (digits = id, else username)."""
     if shop.isdigit():
-        payload = fetch_shop_base(country, shop_id=int(shop))
+        payload = fetch_shop_profile(country, shop_id=int(shop))
     else:
-        payload = fetch_shop_base(country, username=shop)
+        payload = fetch_shop_profile(country, username=shop)
     record = parsers.parse_shop(payload, country)
     if not record.get("id"):
         raise ShopeeNotFound(f"shop {shop} not found")

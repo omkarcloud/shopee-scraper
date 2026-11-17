@@ -1,0 +1,138 @@
+{
+ "queryState": {
+  "mutations": [],
+  "queries": [
+   {
+    "dehydratedAt": 1793780885143,
+    "state": {
+     "data": {
+      "shopid": 442800909,
+      "userid": 442820486,
+      "name": "Apple Flagship Store",
+      "cover": "sg-11134210-824gg-megbs1250rgg92",
+      "follower_count": 187295,
+      "is_official_shop": true,
+      "is_preferred_plus_seller": false,
+      "is_shopee_verified": false,
+      "chat_disabled": false,
+      "rating_star": 4.930826,
+      "account": {
+       "username": "apple.flagshipstore",
+       "following_count": 1,
+       "portrait": "e4495b32893bd11a8c1b8019b80218b6",
+       "is_seller": true,
+       "phone_verified": true,
+       "email_verified": true,
+       "fbid": "",
+       "total_avg_star": 0,
+       "feed_account_info": {
+        "can_post_feed": true
+       },
+       "status": 1
+      },
+      "last_active_time": 1793780454,
+      "vacation": false,
+      "is_blocking_owner": false,
+      "followed": false,
+      "description": "Get your favorite Apple products including iPhone, iPad, Mac, Watch, AirPods and accessories at the Apple Authorised Reseller officially on Shopee.",
+      "item_count": 174,
+      "show_high_end_brand_style": false,
+      "latest_item_ctime": 1793257366,
+      "video_entry": {
+       "show_video_entry": false,
+       "video_entry_info": "",
+       "video_entry_name": "",
+       "video_rn_jump_url": "",
+       "video_count": 0
+      },
+      "floating_cart": {
+       "is_show_floating_cart": false,
+       "floating_cart_switch_tab_refresh_interval": 5
+      },
+      "brand_day": {
+       "background_color": "",
+       "highlight_color": "",
+       "brand_day_end_time": 0
+      },
+      "theme_color": "#000000",
+      "tab_meta": {
+       "shop_tab": {
+        "shop_is_non_deco": false,
+        "shop_without_op_behavior": false,
+        "decoration_type": "general_deco",
+        "is_high_end_brand_shop": false
+       },
+       "campaign_tab": {
+        "show_campaign_tab": false
+       },
+       "membership_tab": {
+        "show_membership_tab": false,
+        "has_join_membership": false
+       },
+       "live_tab": {
+        "show_live_tab": true
+       },
+       "content_tab": {
+        "show_content_tab": false
+       },
+       "review_tab": {
+        "show_review_tab": false
+       }
+      },
+      "toggles": {
+       "disable_chat_performance": false,
+       "deco_theme_color_compo_layout": true,
+       "show_deco_entry": false,
+       "has_shop_deco_access": true,
+       "enable_new_default_landing_logic": true
+      },
+      "is_shopee_choice_shop": false,
+      "is_censored": false,
+      "is_show_instant_mart_shop": false,
+      "farma_info": {
+       "is_apotek": false,
+       "is_100_percent_resmi": false
+      },
+      "ctime": 1620885857,
+      "shop_rating": {
+       "rating_normal": 2616,
+       "rating_bad": 1910,
+       "rating_good": 306248
+      },
+      "response_rate": 100,
+      "response_time": 52,
+      "seller_metrics": {
+       "cancellation_visibility": 0,
+       "cancellation_warning": 5
+      }
+     },
+     "dataUpdateCount": 1,
+     "dataUpdatedAt": 1793780885075,
+     "error": null,
+     "errorUpdateCount": 0,
+     "errorUpdatedAt": 0,
+     "fetchFailureCount": 0,
+     "fetchFailureReason": null,
+     "fetchMeta": null,
+     "isInvalidated": false,
+     "status": "success",
+     "fetchStatus": "idle"
+    },
+    "queryKey": [
+     "shopInfo",
+     "apple.flagshipstore",
+     "mobile_shop_home_page",
+     null,
+     null,
+     null
+    ],
+    "queryHash": "[\"shopInfo\",\"apple.flagshipstore\",\"mobile_shop_home_page\",null,null,null]"
+   }
+  ]
+ },
+ "ssrRenderTime": {
+  "startEpoch": 1793780885057,
+  "endEpoch": 1793780885143
+ },
+ "language": "en"
+}

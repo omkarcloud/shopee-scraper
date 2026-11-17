@@ -31,6 +31,16 @@ def shopee_proxy(country=None):
     return os.environ.get("SHOPEE_PROXY") or None
 
 
-def shopee_fallback_proxy(country=None):
+def shopee_fallback_proxy(country=None, *args, **kwargs):
     """A proxy to switch a market to after a block (None = no fallback)."""
     return None
+
+
+# ---- added by the sync: defaults for a direct run ----
+def gateway_exit(exit=None):
+    return None
+
+
+def shopee_fallback_exits(country=None):
+    return ()
+

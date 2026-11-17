@@ -19,7 +19,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shopee import parsers as P, refs  # noqa: E402
-from shopee.fetch import page_title, product_blob  # noqa: E402
+from shopee.fetch import page_title, product_blob, shop_payload  # noqa: E402
+from scraper_utils.testing import hosted_only
 
 FX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
@@ -236,6 +237,28 @@ def test_parse_shop_from_app_base():
     assert th["is_official_shop"] is True and th["country"] == "TH"
 
 
+def test_parse_shop_from_page_blob():
+    """The shop page's mfe-initial-data blob (read since 2026-11-04, every
+    JSON shop-profile API being gated) yields the same record through
+    fetch.shop_payload; a blob without a shopInfo query is an unknown shop."""
+    payload = shop_payload(fixture("shop_page_blob_apple.json"))
+    assert payload["error"] == 0
+    shop = P.parse_shop(payload, "sg")
+    assert list(shop) == list(P.parse_shop(fixture("shop_base_loreal.json"), "sg"))
+    assert shop["id"] == 442800909 and shop["name"] == "Apple Flagship Store"
+    assert shop["username"] == "apple.flagshipstore" and shop["link"] == "https://shopee.sg/shop/442800909"
+    assert shop["is_official_shop"] is True and shop["is_chat_enabled"] is True and shop["is_on_vacation"] is False
+    assert shop["rating"] == {"average": 4.93, "count": 310774, "good": 306248, "normal": 2616, "bad": 1910}
+    assert shop["items_count"] == 174 and shop["followers_count"] == 187295 and shop["following_count"] == 1
+    assert shop["response_rate_percent"] == 100 and shop["response_time_seconds"] == 52
+    assert shop["has_live_stream"] is True and shop["has_membership"] is False
+    assert shop["latest_item_listed_at"] == "2026-10-29T07:02:46Z" and shop["joined_at"] == "2021-05-13T06:04:17Z"
+    assert shop["description"].startswith("Get your favorite Apple products")
+    assert shop["avatar"].endswith("/e4495b32893bd11a8c1b8019b80218b6")
+    assert shop_payload(fixture("shop_page_blob_unknown.json")) is None
+    assert shop_payload({}) is None and shop_payload(None) is None
+
+
 def test_parse_shop_categories():
     rows, total, has_more = P.parse_shop_categories(fixture("shop_categories_loreal.json"), "sg", 15235546)
     assert total == 25 and has_more is False and len(rows) == 25
@@ -350,3 +373,91 @@ def test_parse_feed():
     discounted = [r for r in rows if r["discount_percent"]]
     assert discounted and discounted[0]["price_before_discount"] > discounted[0]["price"]
     assert P.parse_feed({"data": {"feeds": [{"type": "banner_card"}]}}, "sg") == ([], None)
+
+
+# ---- egress: own IP -> the market's gateway exit -> residential in the market ----------
+
+@hosted_only
+def test_block_fallback_walks_gateway_then_residential(monkeypatch):
+    import config
+    from shopee import fetch
+    monkeypatch.setattr(config, "SHOPEE_EXIT", "direct")
+    monkeypatch.setattr(config, "SHOPEE_GATEWAY_EXITS", {"sg": "gateway:sg", "th": "gateway:sg", "br": "gateway:br"})
+    monkeypatch.setattr(config, "SHOPEE_FALLBACK_RESIDENTIAL", True)
+    monkeypatch.setattr(config, "RETRY_BACKOFF", 0)
+    monkeypatch.setattr(config, "MAX_RETRIES", 3)
+    monkeypatch.setattr(config, "residential_proxy", lambda country, states=None: f"http://resi-{country}:1")
+    monkeypatch.setattr(fetch, "_fallback_until", {})
+    monkeypatch.setattr(fetch, "_fallback_step", {})
+    assert config.shopee_fallback_exits("th") == ["gateway:sg", "th"] and config.shopee_fallback_exits("br") == ["gateway:br", "br"]
+    assert config.shopee_fallback_exits("mx") == ["mx"]            # not in the map: straight to residential
+    assert config.shopee_fallback_proxy("th") == "gateway:sg" and config.shopee_fallback_proxy("th", 2) == "http://resi-th:1"
+    assert config.shopee_proxy("th") is None
+
+    exits, answers = [], {}
+
+    class Resp:
+        def __init__(self, status):
+            self.status_code, self.text, self.url = status, '{"error": 0, "data": {}}', "https://shopee.co.th/x"
+
+        def json(self):
+            return json.loads(self.text)
+
+    class Sess:
+        def __init__(self, exit):
+            self.exit = exit
+
+        def get(self, url, **kw):
+            exits.append(self.exit)
+            status = answers.get(self.exit, 200)
+            if isinstance(status, Exception):
+                raise status
+            return Resp(status)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(fetch.egress, "new_session", lambda exit, impersonate=None: Sess(exit))
+    monkeypatch.setattr(fetch._local, "sessions", {}, raising=False)
+    ok = {"error": 0, "data": {}}
+    # healthy: the pod's own IP, no fallback
+    assert fetch.fetch_category_tree("th") == ok and exits == [None]
+    # the own IP is refused: the retry and the next calls of that market ride its gateway; another market stays direct
+    del exits[:]
+    answers[None] = 418
+    assert fetch.fetch_category_tree("th") == ok and exits == [None, "gateway:sg"]
+    assert fetch.fetch_category_tree("th") == ok and exits[-1] == "gateway:sg" and fetch._fallback_step["th"] == 1
+    answers.pop(None)
+    del exits[:]
+    assert fetch.fetch_category_tree("br") == ok and exits == [None]
+    # the gateway fails without a refusal: the call's last retry rides residential, the next call the gateway again
+    del exits[:]
+    answers["gateway:sg"] = RuntimeError("gateway timeout")
+    assert fetch.fetch_category_tree("th") == ok and exits == ["gateway:sg", "gateway:sg", "http://resi-th:1"]
+    assert fetch._fallback_step["th"] == 1
+    # the gateway is refused: residential in the market's own country for the cooldown
+    del exits[:]
+    answers["gateway:sg"] = 403
+    assert fetch.fetch_category_tree("th") == ok and exits == ["gateway:sg", "http://resi-th:1"]
+    assert fetch.fetch_category_tree("th") == ok and exits[-1] == "http://resi-th:1" and fetch._fallback_step["th"] == 2
+    # the cooldown over: back on the own IP
+    del exits[:]
+    answers.clear()
+    fetch._fallback_until.clear()
+    assert fetch.fetch_category_tree("th") == ok and exits == [None]
+    # a market without a gateway: straight to residential, as before 2026-11-11
+    del exits[:]
+    answers[None] = 429
+    assert fetch.fetch_category_tree("mx") == ok and exits == [None, "http://resi-mx:1"]
+    fetch._fallback_until.clear()
+    # SHOPEE_EXIT = "gateway" (how it was tested): every session rides its market's gateway, residential where it has none
+    del exits[:]
+    answers.clear()
+    monkeypatch.setattr(config, "SHOPEE_EXIT", "gateway")
+    assert config.shopee_proxy("br") == "gateway:br" and config.shopee_proxy("mx") == "http://resi-mx:1"
+    fetch._drop_session("br")           # the thread's direct session from above (the knob is read when a session is built)
+    assert fetch.fetch_category_tree("br") == ok and exits == ["gateway:br"]
+    monkeypatch.setattr(config, "SHOPEE_EXIT", "residential")
+    assert config.shopee_proxy("br") == "http://resi-br:1"
+    for country in list(fetch._local.sessions):
+        fetch._drop_session(country)

@@ -8,10 +8,15 @@ Egress: the pod's own IP first (config.shopee_proxy(country), knob
 SHOPEE_EXIT) — every surface below answered 200 from the GKE pod's own
 Google Cloud IP, two datacenter-proxy exits and two SG residential exits
 (pod probe 2026-10-24, config's "--- Shopee ---" block). A block on
-a market sends that market's new sessions through a residential exit in
-the market's own country for SHOPEE_BLOCK_COOLDOWN seconds
-(config.shopee_fallback_proxy). A retryable failure drops the session, so
-the retry rides a fresh exit.
+a market moves that market's sessions one fallback step down for
+SHOPEE_BLOCK_COOLDOWN seconds: since 2026-11-11 first to the market's gateway
+exit (config.SHOPEE_GATEWAY_EXITS, exit_gateway.py: a fresh gateway address
+on nearly every request; "gateway:sg" for the Asian markets, "gateway:br" for br /
+mx; the numbers are in config.py's block), and only when that is refused
+too to a residential exit in the market's own country
+(config.shopee_fallback_proxy). A call the gateway keeps failing makes its
+LAST retry on the residential exit, for that call only. A retryable failure
+drops the session, so the retry rides a fresh exit.
 
 Language signals match the market (owner rule 2026-10-24): Accept-Language
 is the market's own q-weighted list (refs.ACCEPT_LANGUAGE_OF, e.g.
@@ -32,12 +37,22 @@ Surfaces (all GET, all per market host; JSON unless noted):
     pod's own IP and any non-market exit get a 160 KB shell; with it every
     market answers the blob from the pod's own IP). An unknown id answers
     HTTP 200 with an EMPTY cachedMap (parsers.parse_product -> None).
-  * SHOP          /api/v4/shop/get_shop_base?shopid=|username= with the
-    Android app identity (APP_HEADERS; unknown id or username -> error
-    1000000 service_err). The web get_shop_detail it replaced went behind
-    the 90309999 gate on 2026-10-26 on every market and every exit tier
-    (pod test: direct, datacenter-proxy and country residential exits all
-    403), while get_shop_base with the app identity answered all 9 markets.
+  * SHOP PAGE     /shop/<shop_id> or /<username> — HTML whose mfe-initial-data
+    blob (same PAGE_HEADERS trick as the product page) carries the shop
+    record under the queryState query keyed ["shopInfo", <ref>, ...]: the
+    very payload get_shop_base's `data` used to be (shopid, name, account,
+    shop_rating, follower_count, item_count, response_*, ctime, ...). An
+    unknown id or username answers HTTP 200 with the home shell: a blob
+    WITHOUT a shopInfo query -> ShopeeNotFound. Pod test 2026-11-04: the
+    page answered the record from the pod's own IP on all 9 markets, by id
+    and by username. Every JSON shop-profile API is gated now: the web
+    get_shop_detail since 2026-10-26, and since ~2026-11-01 get_shop_base
+    with the Android-app identity too (HTTP 418 + error 90309999 — the
+    same from the pod IP, a US datacenter exit and an SG residential exit,
+    with and without the SPC_* cookies of a prior page load, with the web
+    identity's af-ac-enc-dat / x-sz-sdk-version / sec-fetch headers, and
+    for product/get_shop_info, get_shop_tab and rcmd_items as well), so
+    egress and headers are not the variable — the page is.
   * SHOP CATS     /api/v4/shop/get_categories?shopid=&offset=&limit=
   * SHOP REVIEWS  /api/v4/seller_operation/get_shop_ratings_new?shopid=
                   &type=<1..5 stars>&limit=&offset=  (type=0 answers nothing)
@@ -56,8 +71,11 @@ Failure taxonomy (scraper_errors, mapped to HTTP by route_glue):
   ShopeeBlocked        403 / 418 / 429 / error 90309999 / verify page   — retryable (fresh exit)
   ShopeeBadRequest     upstream 400                                     — never retried
   ShopeeNotFound       unknown shop / username / product               — never retried
+
+History: shop profile = web get_shop_detail until 2026-10-26, the app's
+get_shop_base until ~2026-11-01, the shop page's blob since 2026-11-04.
 """
-import json
+import fastjson
 import os
 import re
 import sys
@@ -67,8 +85,10 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
+import egress
 from scraper_errors import BadRequest, Blocked, NotFound, UpstreamError
 from shopee import refs
+from scraper_utils import sessions as sessions_utils
 
 IMPERSONATE = "chrome"
 PAGE_TIMEOUT = 40      # product pages are 0.6-1 MB
@@ -84,16 +104,8 @@ API_HEADERS = {
     "x-requested-with": "XMLHttpRequest",
     "x-shopee-language": "en",
 }
-# The Android app's identity: the shop profile (get_shop_base) is open to it
-# while the web identity gets the 90309999 gate (2026-10-26).
-APP_HEADERS = {
-    "accept": "application/json",
-    "user-agent": "Android app Shopee appver=33330 app_type=1 platform=native_android os_ver=34 Cronet/102.0.5005.125",
-    "x-api-source": "rn",
-    "x-shopee-language": "en",
-}
-# The x-* trio is what makes Shopee render the product blob server-side
-# (module docstring); accept stays a document accept.
+# The x-* trio is what makes Shopee render the product / shop blob
+# server-side (module docstring); accept stays a document accept.
 PAGE_HEADERS = {
     "accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
                "image/avif,image/webp,*/*;q=0.8"),
@@ -121,19 +133,36 @@ class ShopeeNotFound(NotFound):
 
 # ---- sessions: one per worker thread per market, one exit each ------------------
 _local = threading.local()
-_fallback_until = {}            # market -> epoch until which new sessions take the fallback exit
+_fallback_until = {}            # market -> epoch until which its sessions take a fallback exit
+_fallback_step = {}             # market -> the fallback step that serves while its cooldown runs (1 = the first)
 _fallback_lock = threading.Lock()
 
 
-def _proxy_for(country):
+def _gateway_step(country, step):
+    """True when the market's fallback step `step` is the gateway exit with
+    another exit configured behind it."""
+    exits = config.shopee_fallback_exits(country)
+    return 0 < step < len(exits) and bool(config.gateway_exit(exits[step - 1]))
+
+
+def _step(country):
+    """The fallback step a session of the market built NOW rides: 0 = the
+    configured exit (the pod's own IP), 1, 2 =
+    config.shopee_fallback_proxy(country, step) while the market's cooldown
+    runs; one step past the gateway for the last retry of a call (_retrying)."""
+    with _fallback_lock:
+        step = _fallback_step.get(country, 1) if _fallback_until.get(country, 0) > time.time() else 0
+    if getattr(_local, "past_gateway", False) and _gateway_step(country, step):
+        step += 1
+    return step
+
+
+def _proxy_for(country, step=None):
     forced = config.shopee_proxy(country)
     if forced:
         return forced
-    with _fallback_lock:
-        until = _fallback_until.get(country, 0)
-    if until > time.time():
-        return config.shopee_fallback_proxy(country)
-    return None
+    step = _step(country) if step is None else step
+    return config.shopee_fallback_proxy(country, step) if step else None
 
 
 def _session(country):
@@ -141,12 +170,17 @@ def _session(country):
     if sessions is None:
         sessions = _local.sessions = {}
     sess = sessions.get(country)
+    step = _step(country)
+    if sess is not None and getattr(sess, "_shopee_step", 0) != step:
+        # 2026-11-11: a session follows its market's step. Before, a thread
+        # that took the fallback exit during a cooldown stayed on it until
+        # that exit failed.
+        _drop_session(country)
+        sess = None
     if sess is None:
-        from curl_cffi import requests as curl_requests
-        sess = curl_requests.Session(impersonate=IMPERSONATE)
-        proxy = _proxy_for(country)
-        if proxy:
-            sess.proxies = {"http": proxy, "https": proxy}
+        # None (the own IP), a proxy URL, or the gateway exit ("gateway:sg")
+        sess = egress.new_session(_proxy_for(country, step), impersonate=IMPERSONATE)
+        sess._shopee_step = step
         sessions[country] = sess
     return sess
 
@@ -156,37 +190,61 @@ def _drop_session(country):
     refused exit dies with it."""
     sessions = getattr(_local, "sessions", None) or {}
     sess = sessions.pop(country, None)
-    if sess is not None:
-        try:
-            sess.close()
-        except Exception:
-            pass
+    sessions_utils.close_quietly(sess)
 
 
 def _note_block(country):
-    if config.shopee_fallback_proxy(country) is not None:
-        with _fallback_lock:
-            _fallback_until[country] = time.time() + config.SHOPEE_BLOCK_COOLDOWN
+    """The exit this thread's session of the market rides was refused: the
+    market's sessions move one fallback step down for a cooldown (own IP ->
+    its gateway exit -> residential; on the last step they stay there, each
+    on a fresh exit). No-op when no fallback is configured."""
+    exits = config.shopee_fallback_exits(country)
+    if not exits:
+        return
+    sess = (getattr(_local, "sessions", None) or {}).get(country)
+    own = getattr(sess, "_shopee_step", _step(country))
+    if getattr(_local, "past_gateway", False) and own > (
+            _fallback_step.get(country, 1) if _fallback_until.get(country, 0) > time.time() else 0):
+        # the exit borrowed behind the gateway for this call's last retry
+        # (_retrying) was refused: no verdict on the gateway, the market's step stays
+        return
+    step = min(own + 1, len(exits))
+    with _fallback_lock:
+        if time.time() >= _fallback_until.get(country, 0) or step > _fallback_step.get(country, 1):
+            _fallback_step[country] = step
+        _fallback_until[country] = time.time() + config.SHOPEE_BLOCK_COOLDOWN
+        now = _fallback_step[country]
+    if len(exits) > 1:      # how often each step is refused is the number to watch
+        print(f"shopee: {country} exit refused, its sessions on fallback step {now} "
+              f"({exits[now - 1]}) for {config.SHOPEE_BLOCK_COOLDOWN} s")
 
 
 def _retrying(country, fn):
     """Run fn() under the shared retry policy (ShopeeUpstreamError only;
-    NotFound / BadRequest surface immediately). A block starts the
-    market's fallback cooldown; every retryable failure drops the session."""
+    NotFound / BadRequest surface immediately). A block moves the market
+    one fallback step down for a cooldown; every retryable failure drops
+    the session. While the market's sessions are on the gateway exit step
+    the LAST retry of a call rides the next step (the residential exit),
+    for that call only: a gateway failure then costs latency, not the call."""
     last = None
-    for attempt in range(1, config.MAX_RETRIES + 1):
-        try:
-            return fn()
-        except ShopeeBlocked as e:
-            last = e
-            _note_block(country)
-            _drop_session(country)
-        except ShopeeUpstreamError as e:
-            last = e
-            _drop_session(country)
-        if attempt < config.MAX_RETRIES:
-            time.sleep(config.RETRY_BACKOFF * attempt)
-    raise last
+    _local.past_gateway = False
+    try:
+        for attempt in range(1, config.MAX_RETRIES + 1):
+            try:
+                return fn()
+            except ShopeeBlocked as e:
+                last = e
+                _note_block(country)
+                _drop_session(country)
+            except ShopeeUpstreamError as e:
+                last = e
+                _drop_session(country)
+            if attempt < config.MAX_RETRIES:
+                _local.past_gateway = attempt + 1 == config.MAX_RETRIES     # read by _step() for the session built next
+                time.sleep(config.RETRY_BACKOFF * attempt)
+        raise last
+    finally:
+        _local.past_gateway = False     # _session() rebuilds on the market's own step for the next call
 
 
 def _headers(country, base, referer=None):
@@ -270,7 +328,7 @@ def product_blob(html):
     if not match:
         return None
     try:
-        return json.loads(match.group(1))
+        return fastjson.loads(match.group(1))
     except ValueError:
         return None
 
@@ -287,13 +345,53 @@ RATINGS_NOT_FOUND_ERRORS = (10000,)          # get_shop_ratings_new for a non-ex
 VOUCHERS_NOT_FOUND_ERRORS = (5300000,)       # get_shop_vouchers_by_shopid for a non-existent shop
 
 
-def fetch_shop_base(country, shop_id=None, username=None):
-    """The shop profile (get_shop_base) with the app identity — the web
-    get_shop_detail is gated since 2026-10-26 (module docstring)."""
-    params = {"shopid": shop_id} if shop_id else {"username": username}
+def shop_payload(blob):
+    """The shop record of a shop page's mfe-initial-data blob, wrapped as the
+    {"error": 0, "data": {...}} payload parsers.parse_shop reads (it is the
+    shape get_shop_base answered), or None when the blob has no shopInfo
+    query (Shopee's home shell for an unknown shop). The page's tab_meta is
+    mirrored into show_tab's live / membership flags so the parser's
+    has_live_stream / has_membership keep their values."""
+    queries = ((blob or {}).get("queryState") or {}).get("queries") or []
+    for query in queries:
+        key = query.get("queryKey")
+        data = (query.get("state") or {}).get("data")
+        if isinstance(key, list) and key and key[0] == "shopInfo" and isinstance(data, dict) and data.get("shopid"):
+            tabs = data.get("tab_meta") if isinstance(data.get("tab_meta"), dict) else {}
+            if tabs and "show_tab" not in data:
+                live = tabs.get("live_tab") if isinstance(tabs.get("live_tab"), dict) else {}
+                data["show_tab"] = {"show_live_tab": live.get("show_live_tab"),
+                                    "membership_tab": tabs.get("membership_tab")}
+            return {"error": 0, "error_msg": "", "data": data}
+    return None
+
+
+def _shop_page_once(country, shop_id, username):
     label = f"shop {shop_id or username}"
-    return _json(country, "/api/v4/shop/get_shop_base", label, params,
-                 not_found_errors=SHOP_NOT_FOUND_ERRORS, base_headers=APP_HEADERS)
+    url = refs.shop_link(country, shop_id) if shop_id else refs.shop_username_link(country, username)
+    try:
+        resp = _session(country).get(url, headers=_headers(country, PAGE_HEADERS), timeout=PAGE_TIMEOUT)
+    except Exception as e:
+        raise ShopeeUpstreamError(f"request failed: {type(e).__name__}: {e}")
+    _status_check(resp, label)
+    final = str(resp.url or "")
+    if "/verify/" in final or "/buyer/login" in final:
+        raise ShopeeBlocked(f"redirected to {final.split('?')[0]} for {label}")
+    blob = product_blob(resp.text)
+    if blob is None:
+        raise ShopeeBlocked(f"shop page served without its data blob for {label}")
+    payload = shop_payload(blob)
+    if payload is None:
+        raise ShopeeNotFound(f"{label} not found")
+    return payload
+
+
+def fetch_shop_profile(country, shop_id=None, username=None):
+    """The shop profile from the shop page's server-rendered blob (module
+    docstring, SHOP PAGE): get_shop_base-shaped so parsers.parse_shop reads
+    it unchanged. Every JSON shop-profile API is behind the anti-fraud gate
+    since ~2026-11-01 (measured 2026-11-04)."""
+    return _retrying(country, lambda: _shop_page_once(country, shop_id, username))
 
 
 def fetch_shop_categories(country, shop_id, offset=0, limit=50):
